@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+# env2llm - Development environment profiler for LLM context
+# Version: 1.0.0
+
+# Script configuration
+readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_NAME="env2llm"
+
+# Handle help flag first
+if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+    cat << EOF
+env2llm - Development Environment Profiler for LLM Context
+
+Usage: env2llm [--help]
+
+Description:
+  Generates a comprehensive profile of your Python/Docker/Kubernetes
+  development environment optimized for sharing with LLMs.
+
+Output:
+  Writes to stdout. Redirect to save:
+  env2llm > profile.txt
+
+Requirements:
+  - Bash 4.0+
+  - Python 3.x development environment
+  - Docker (optional)
+  - Kubernetes (optional)
+
+EOF
+    exit 0
+fi
+
+# Core utility functions
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+print_section() {
+    echo "[$1]"
+}
+
+safe_exec() {
+    "$@" 2>/dev/null || echo "Error executing: $*"
+}
+
+check_port() {
+    local port="$1"
+    if command_exists lsof; then
+        if lsof -i ":$port" >/dev/null 2>&1; then
+            echo "Port $port: In use"
+        else
+            echo "Port $port: Available"
+        fi
+    elif command_exists netstat; then
+        if netstat -ln 2>/dev/null | grep -q ":$port "; then
+            echo "Port $port: In use"
+        else
+            echo "Port $port: Available"
+        fi
+    else
+        echo "Port $port: Cannot check (no lsof or netstat)"
+    fi
+}
+
+# Information gathering functions
+gather_system_info() {
+    print_section "SYSTEM"
+    
+    # OS detection
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        os_info=$(sw_vers -productName 2>/dev/null || echo "macOS")
+        os_version=$(sw_vers -productVersion 2>/dev/null || echo "Unknown")
+        echo "- OS: $os_info $os_version"
+        
+        # Memory on macOS
+        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo "0")
+        mem_gb=$((mem_bytes / 1024 / 1024 / 1024))
+        echo "- Memory: ${mem_gb} GB"
+        
+        # Disk space
+        disk_avail=$(df -h . 2>/dev/null | awk 'NR==2 {print $4}' || echo "Unknown")
+        echo "- Disk Available: $disk_avail"
+        
+        # Architecture
+        arch=$(uname -m 2>/dev/null || echo "Unknown")
+        echo "- Architecture: $arch"
+        
+    else
+        # Linux
+        if [[ -f /etc/os-release ]]; then
+            os_info=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "Linux")
+        else
+            os_info="Linux"
+        fi
+        echo "- OS: $os_info"
+        
+        # Memory on Linux
+        if [[ -f /proc/meminfo ]]; then
+            mem_kb=$(grep '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+            mem_gb=$((mem_kb / 1024 / 1024))
+            echo "- Memory: ${mem_gb} GB"
+        else
+            echo "- Memory: Unknown"
+        fi
+        
+        # Disk space
+        disk_avail=$(df -h . 2>/dev/null | awk 'NR==2 {print $4}' || echo "Unknown")
+        echo "- Disk Available: $disk_avail"
+        
+        # Architecture
+        arch=$(uname -m 2>/dev/null || echo "Unknown")
+        echo "- Architecture: $arch"
+    fi
+    
+    echo ""
+}
+
+gather_shell_info() {
+    print_section "SHELL"
+    
+    # Current shell
+    echo "- Shell: ${SHELL:-Unknown}"
+    
+    # Working directory
+    current_dir=$(pwd 2>/dev/null || echo "Unknown")
+    echo "- Working Dir: $current_dir"
+    
+    # Virtual environment
+    if [[ -n "$VIRTUAL_ENV" ]]; then
+        venv_name=$(basename "$VIRTUAL_ENV")
+        echo "- Virtual Env: $venv_name"
+    else
+        echo "- Virtual Env: None"
+    fi
+    
+    # PYTHONPATH
+    if [[ -n "$PYTHONPATH" ]]; then
+        echo "- PYTHONPATH: Set"
+    else
+        echo "- PYTHONPATH: Not set"
+    fi
+    
+    # PATH (first 5 entries)
+    if [[ -n "$PATH" ]]; then
+        path_entries=$(echo "$PATH" | tr ':' '\n' | head -5 | tr '\n' ':' | sed 's/:$//')
+        echo "- PATH (first 5): $path_entries"
+    fi
+    
+    # Shell framework detection
+    if [[ -n "$ZSH_VERSION" ]] && [[ -d "$HOME/.oh-my-zsh" ]]; then
+        echo "- Framework: Oh My Zsh"
+    elif [[ -f "$HOME/.bashrc" ]] && grep -q "bash-it" "$HOME/.bashrc" 2>/dev/null; then
+        echo "- Framework: Bash-it"
+    else
+        echo "- Framework: None detected"
+    fi
+    
+    echo ""
+}
+
+gather_python_info() {
+    print_section "PYTHON"
+    
+    # Python version
+    if command_exists python3; then
+        py_version=$(python3 --version 2>/dev/null || echo "Error getting version")
+        echo "- Python: $py_version"
+    else
+        echo "- Python: Not found"
+    fi
+    
+    # pip version
+    if command_exists pip3; then
+        pip_version=$(pip3 --version 2>/dev/null | awk '{print $2}' || echo "Error")
+        echo "- pip: $pip_version"
+    elif command_exists pip; then
+        pip_version=$(pip --version 2>/dev/null | awk '{print $2}' || echo "Error")
+        echo "- pip: $pip_version"
+    else
+        echo "- pip: Not found"
+    fi
+    
+    # Package count
+    if command_exists pip3; then
+        pkg_count=$(pip3 list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+        echo "- Installed packages: $pkg_count"
+    elif command_exists pip; then
+        pkg_count=$(pip list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+        echo "- Installed packages: $pkg_count"
+    fi
+    
+    # Check for project files
+    local found_files=()
+    [[ -f "requirements.txt" ]] && found_files+=("requirements.txt")
+    [[ -f "pyproject.toml" ]] && found_files+=("pyproject.toml")
+    [[ -f "Pipfile" ]] && found_files+=("Pipfile")
+    [[ -f "setup.py" ]] && found_files+=("setup.py")
+    
+    if [[ ${#found_files[@]} -gt 0 ]]; then
+        echo "- Project files: ${found_files[*]}"
+    else
+        echo "- Project files: None found"
+    fi
+    
+    echo ""
+}
+
+gather_docker_info() {
+    print_section "DOCKER"
+    
+    # Docker version
+    if command_exists docker; then
+        docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | sed 's/,$//' || echo "Error")
+        echo "- Docker: $docker_version"
+        
+        # Docker daemon status
+        if docker info >/dev/null 2>&1; then
+            echo "- Daemon: Running"
+            
+            # Running containers
+            container_count=$(docker ps --format "table {{.Names}}" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+            if [[ "$container_count" -gt 0 ]]; then
+                echo "- Running containers: $container_count"
+                container_names=$(docker ps --format "{{.Names}}" 2>/dev/null | head -5 | tr '\n' ', ' | sed 's/, $//')
+                echo "- Container names: $container_names"
+            else
+                echo "- Running containers: 0"
+            fi
+        else
+            echo "- Daemon: Not running"
+        fi
+    else
+        echo "- Docker: Not installed"
+    fi
+    
+    # Docker Compose
+    if command_exists docker-compose; then
+        compose_version=$(docker-compose --version 2>/dev/null | awk '{print $3}' | sed 's/,$//' || echo "Error")
+        echo "- Docker Compose: $compose_version"
+    elif docker compose version >/dev/null 2>&1; then
+        compose_version=$(docker compose version 2>/dev/null | awk '{print $3}' || echo "Error")
+        echo "- Docker Compose: $compose_version (plugin)"
+    else
+        echo "- Docker Compose: Not installed"
+    fi
+    
+    # Check for Docker files
+    local found_files=()
+    [[ -f "Dockerfile" ]] && found_files+=("Dockerfile")
+    [[ -f "docker-compose.yml" ]] && found_files+=("docker-compose.yml")
+    [[ -f "docker-compose.yaml" ]] && found_files+=("docker-compose.yaml")
+    [[ -f ".dockerignore" ]] && found_files+=(".dockerignore")
+    
+    if [[ ${#found_files[@]} -gt 0 ]]; then
+        echo "- Docker files: ${found_files[*]}"
+    else
+        echo "- Docker files: None found"
+    fi
+    
+    echo ""
+}
+
+gather_kubernetes_info() {
+    print_section "KUBERNETES"
+    
+    # kubectl version
+    if command_exists kubectl; then
+        kubectl_version=$(kubectl version --client --short 2>/dev/null | awk '{print $3}' || echo "Error")
+        echo "- kubectl: $kubectl_version"
+        
+        # Current context and namespace
+        current_context=$(kubectl config current-context 2>/dev/null || echo "None")
+        echo "- Current context: $current_context"
+        
+        current_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null || echo "default")
+        [[ -z "$current_namespace" ]] && current_namespace="default"
+        echo "- Current namespace: $current_namespace"
+        
+        # Cluster accessibility
+        if kubectl cluster-info >/dev/null 2>&1; then
+            echo "- Cluster access: Connected"
+        else
+            echo "- Cluster access: Cannot connect"
+        fi
+    else
+        echo "- kubectl: Not installed"
+    fi
+    
+    # Local K8s detection
+    local k8s_type="None"
+    if command_exists minikube && minikube status >/dev/null 2>&1; then
+        k8s_type="minikube"
+    elif command_exists kind && kind get clusters >/dev/null 2>&1; then
+        k8s_type="kind"
+    elif docker info 2>/dev/null | grep -q "kubernetes"; then
+        k8s_type="docker-desktop"
+    fi
+    echo "- Local K8s: $k8s_type"
+    
+    # Check for K8s manifests
+    local manifest_count=0
+    if [[ -d "k8s" ]]; then
+        manifest_count=$(find k8s -name "*.yaml" -o -name "*.yml" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [[ -d "manifests" ]]; then
+        manifest_count=$((manifest_count + $(find manifests -name "*.yaml" -o -name "*.yml" 2>/dev/null | wc -l | tr -d ' ')))
+    fi
+    
+    if [[ "$manifest_count" -gt 0 ]]; then
+        echo "- K8s manifests: $manifest_count found"
+    else
+        echo "- K8s manifests: None found"
+    fi
+    
+    echo ""
+}
+
+gather_project_info() {
+    print_section "PROJECT"
+    
+    # Git status
+    if command_exists git && git rev-parse --git-dir >/dev/null 2>&1; then
+        branch=$(git branch --show-current 2>/dev/null || echo "Unknown")
+        echo "- Git branch: $branch"
+        
+        if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null; then
+            echo "- Git status: Clean"
+        else
+            echo "- Git status: Dirty (uncommitted changes)"
+        fi
+        
+        # Remote (without sensitive info)
+        remote_url=$(git remote get-url origin 2>/dev/null || echo "None")
+        if [[ "$remote_url" != "None" ]]; then
+            # Remove tokens/credentials from URL
+            sanitized_url=$(echo "$remote_url" | sed 's/\/\/[^@]*@/\/\/***@/')
+            echo "- Git remote: $sanitized_url"
+        fi
+    else
+        echo "- Git: Not a repository"
+    fi
+    
+    # Project structure (top-level directories)
+    if command_exists find; then
+        dir_count=$(find . -maxdepth 1 -type d ! -name ".*" ! -name "." 2>/dev/null | wc -l | tr -d ' ')
+        echo "- Top-level directories: $dir_count"
+        
+        # List some key directories
+        key_dirs=$(find . -maxdepth 1 -type d -name "src" -o -name "lib" -o -name "app" -o -name "tests" -o -name "docs" 2>/dev/null | head -5 | tr '\n' ' ')
+        [[ -n "$key_dirs" ]] && echo "- Key directories: $key_dirs"
+    fi
+    
+    # Entry point detection
+    local entry_points=()
+    [[ -f "app.py" ]] && entry_points+=("app.py")
+    [[ -f "main.py" ]] && entry_points+=("main.py")
+    [[ -f "manage.py" ]] && entry_points+=("manage.py")
+    [[ -f "run.py" ]] && entry_points+=("run.py")
+    
+    if [[ ${#entry_points[@]} -gt 0 ]]; then
+        echo "- Entry points: ${entry_points[*]}"
+    else
+        echo "- Entry points: None found"
+    fi
+    
+    # Config files
+    local config_files=()
+    [[ -f ".env" ]] && config_files+=(".env")
+    [[ -f "config.py" ]] && config_files+=("config.py")
+    [[ -f "settings.py" ]] && config_files+=("settings.py")
+    [[ -f ".env.example" ]] && config_files+=(".env.example")
+    
+    if [[ ${#config_files[@]} -gt 0 ]]; then
+        echo "- Config files: ${config_files[*]}"
+    else
+        echo "- Config files: None found"
+    fi
+    
+    echo ""
+}
+
+gather_network_info() {
+    print_section "NETWORK"
+    
+    # Check common development ports
+    local ports=(3000 5000 8000 8080)
+    for port in "${ports[@]}"; do
+        check_port "$port"
+    done
+    
+    # Internet connectivity
+    if command_exists curl; then
+        if curl -s --max-time 3 https://github.com >/dev/null 2>&1; then
+            echo "- Internet: Connected (github.com reachable)"
+        else
+            echo "- Internet: Limited or no connectivity"
+        fi
+    elif command_exists ping; then
+        if ping -c 1 -W 3000 github.com >/dev/null 2>&1; then
+            echo "- Internet: Connected (github.com reachable)"
+        else
+            echo "- Internet: Limited or no connectivity"
+        fi
+    else
+        echo "- Internet: Cannot test (no curl or ping)"
+    fi
+    
+    # Proxy settings
+    if [[ -n "$HTTP_PROXY" ]] || [[ -n "$HTTPS_PROXY" ]] || [[ -n "$http_proxy" ]] || [[ -n "$https_proxy" ]]; then
+        echo "- Proxy: Configured"
+    else
+        echo "- Proxy: Not configured"
+    fi
+    
+    echo ""
+}
+
+# Main execution
+main() {
+    echo "=== env2llm Profile ==="
+    echo "Generated: $(date)"
+    echo "Purpose: Python/Docker/Kubernetes PoC Development"
+    echo ""
+    
+    gather_system_info
+    gather_shell_info
+    gather_python_info
+    gather_docker_info
+    gather_kubernetes_info
+    gather_project_info
+    gather_network_info
+    
+    echo "=== End Profile ==="
+}
+
+# Execute main function
+main
