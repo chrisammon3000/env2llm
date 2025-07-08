@@ -19,13 +19,13 @@ A fast, lightweight bash script that profiles your Python development environmen
 
 ### Option 1: Direct Download
 ```bash
-curl -o env2llm https://raw.githubusercontent.com/your-username/env2llm/main/env2llm
+curl -o env2llm https://raw.githubusercontent.com/chrisammon3000/env2llm/main/env2llm
 chmod +x env2llm
 ```
 
 ### Option 2: Clone Repository
 ```bash
-git clone https://github.com/your-username/env2llm.git
+git clone https://github.com/chrisammon3000/env2llm.git
 cd env2llm
 chmod +x env2llm
 ```
