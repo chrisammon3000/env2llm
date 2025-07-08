@@ -32,8 +32,8 @@ chmod +x env2llm
 
 ### Option 3: Add to PATH
 ```bash
-# After downloading, move to a directory in your PATH
-sudo mv env2llm /usr/local/bin/
+# After downloading, copy to a directory in your PATH
+sudo cp env2llm /usr/local/bin/
 ```
 
 ## Usage
