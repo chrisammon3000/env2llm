@@ -188,7 +188,7 @@ Port 8080: In use
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This is a one-shot project made with Claude Code, contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
